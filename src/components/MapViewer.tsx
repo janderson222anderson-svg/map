@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState, useCallback } from "react";
 import maplibregl from "maplibre-gl";
 import "maplibre-gl/dist/maplibre-gl.css";
-import { motion } from "framer-motion";
+import { motion, AnimatePresence } from "framer-motion";
 import {
   ZoomIn,
   ZoomOut,
@@ -12,9 +12,19 @@ import {
   LocateFixed,
   Compass,
   Loader2,
+  Route,
+  MapPin,
+  X,
+  Clock,
+  Ruler,
+  Car,
+  Bike,
+  Footprints,
+  RotateCcw,
 } from "lucide-react";
 
 type MapStyle = "streets" | "satellite" | "terrain";
+type TravelMode = "driving" | "cycling" | "walking";
 
 const mapStyles: Record<MapStyle, { name: string; url: string }> = {
   streets: {
@@ -31,6 +41,12 @@ const mapStyles: Record<MapStyle, { name: string; url: string }> = {
   },
 };
 
+const travelModes: Record<TravelMode, { name: string; icon: typeof Car; profile: string }> = {
+  driving: { name: "Drive", icon: Car, profile: "driving" },
+  cycling: { name: "Cycle", icon: Bike, profile: "cycling" },
+  walking: { name: "Walk", icon: Footprints, profile: "foot" },
+};
+
 // Major cities of Pakistan
 const pakistanCities = [
   { name: "Islamabad", coordinates: [73.0479, 33.6844] as [number, number], type: "capital" },
@@ -43,10 +59,23 @@ const pakistanCities = [
   { name: "Rawalpindi", coordinates: [73.0169, 33.5651] as [number, number], type: "city" },
 ];
 
+interface RoutePoint {
+  lngLat: [number, number];
+  name?: string;
+}
+
+interface RouteInfo {
+  distance: number; // in meters
+  duration: number; // in seconds
+  geometry: GeoJSON.LineString;
+}
+
 const MapViewer = () => {
   const mapContainer = useRef<HTMLDivElement>(null);
   const map = useRef<maplibregl.Map | null>(null);
   const userMarker = useRef<maplibregl.Marker | null>(null);
+  const startMarker = useRef<maplibregl.Marker | null>(null);
+  const endMarker = useRef<maplibregl.Marker | null>(null);
   const markersRef = useRef<maplibregl.Marker[]>([]);
 
   const [activeStyle, setActiveStyle] = useState<MapStyle>("streets");
@@ -55,6 +84,15 @@ const MapViewer = () => {
   const [isLocating, setIsLocating] = useState(false);
   const [locationError, setLocationError] = useState<string | null>(null);
 
+  // Routing state
+  const [isRoutingMode, setIsRoutingMode] = useState(false);
+  const [startPoint, setStartPoint] = useState<RoutePoint | null>(null);
+  const [endPoint, setEndPoint] = useState<RoutePoint | null>(null);
+  const [routeInfo, setRouteInfo] = useState<RouteInfo | null>(null);
+  const [isCalculatingRoute, setIsCalculatingRoute] = useState(false);
+  const [travelMode, setTravelMode] = useState<TravelMode>("driving");
+  const [selectingPoint, setSelectingPoint] = useState<"start" | "end" | null>(null);
+
   // Initialize map
   useEffect(() => {
     if (!mapContainer.current || map.current) return;
@@ -62,26 +100,23 @@ const MapViewer = () => {
     map.current = new maplibregl.Map({
       container: mapContainer.current,
       style: mapStyles[activeStyle].url,
-      center: [69.3451, 30.3753], // Center of Pakistan
+      center: [69.3451, 30.3753],
       zoom: 5,
       pitch: 0,
       bearing: 0,
       attributionControl: false,
     });
 
-    // Add attribution control
     map.current.addControl(
       new maplibregl.AttributionControl({ compact: true }),
       "bottom-left"
     );
 
-    // Add scale control
     map.current.addControl(
       new maplibregl.ScaleControl({ maxWidth: 100, unit: "metric" }),
       "bottom-right"
     );
 
-    // Update state on map move
     map.current.on("move", () => {
       if (!map.current) return;
       const center = map.current.getCenter();
@@ -89,7 +124,6 @@ const MapViewer = () => {
       setZoom(map.current.getZoom());
     });
 
-    // Add city markers after style loads
     map.current.on("load", () => {
       addCityMarkers();
     });
@@ -101,11 +135,234 @@ const MapViewer = () => {
     };
   }, []);
 
+  // Handle map click for routing
+  useEffect(() => {
+    if (!map.current) return;
+
+    const handleMapClick = (e: maplibregl.MapMouseEvent) => {
+      if (!isRoutingMode || !selectingPoint) return;
+
+      const lngLat: [number, number] = [e.lngLat.lng, e.lngLat.lat];
+      
+      if (selectingPoint === "start") {
+        setStartPoint({ lngLat });
+        setSelectingPoint("end");
+      } else if (selectingPoint === "end") {
+        setEndPoint({ lngLat });
+        setSelectingPoint(null);
+      }
+    };
+
+    map.current.on("click", handleMapClick);
+
+    return () => {
+      map.current?.off("click", handleMapClick);
+    };
+  }, [isRoutingMode, selectingPoint]);
+
+  // Update markers when points change
+  useEffect(() => {
+    if (!map.current) return;
+
+    // Update start marker
+    if (startPoint) {
+      if (startMarker.current) {
+        startMarker.current.setLngLat(startPoint.lngLat);
+      } else {
+        const el = document.createElement("div");
+        el.innerHTML = `
+          <div class="relative">
+            <div class="w-8 h-8 bg-emerald-500 rounded-full flex items-center justify-center shadow-lg border-2 border-white">
+              <span class="text-white text-sm font-bold">A</span>
+            </div>
+            <div class="absolute -bottom-1 left-1/2 -translate-x-1/2 w-2 h-2 bg-emerald-500 rotate-45"></div>
+          </div>
+        `;
+        startMarker.current = new maplibregl.Marker({ element: el, anchor: "bottom" })
+          .setLngLat(startPoint.lngLat)
+          .addTo(map.current);
+      }
+    } else if (startMarker.current) {
+      startMarker.current.remove();
+      startMarker.current = null;
+    }
+
+    // Update end marker
+    if (endPoint) {
+      if (endMarker.current) {
+        endMarker.current.setLngLat(endPoint.lngLat);
+      } else {
+        const el = document.createElement("div");
+        el.innerHTML = `
+          <div class="relative">
+            <div class="w-8 h-8 bg-red-500 rounded-full flex items-center justify-center shadow-lg border-2 border-white">
+              <span class="text-white text-sm font-bold">B</span>
+            </div>
+            <div class="absolute -bottom-1 left-1/2 -translate-x-1/2 w-2 h-2 bg-red-500 rotate-45"></div>
+          </div>
+        `;
+        endMarker.current = new maplibregl.Marker({ element: el, anchor: "bottom" })
+          .setLngLat(endPoint.lngLat)
+          .addTo(map.current);
+      }
+    } else if (endMarker.current) {
+      endMarker.current.remove();
+      endMarker.current = null;
+    }
+  }, [startPoint, endPoint]);
+
+  // Calculate route when both points are set
+  useEffect(() => {
+    if (startPoint && endPoint) {
+      calculateRoute();
+    }
+  }, [startPoint, endPoint, travelMode]);
+
+  const calculateRoute = async () => {
+    if (!startPoint || !endPoint || !map.current) return;
+
+    setIsCalculatingRoute(true);
+    setRouteInfo(null);
+
+    try {
+      const profile = travelModes[travelMode].profile;
+      const url = `https://router.project-osrm.org/route/v1/${profile}/${startPoint.lngLat[0]},${startPoint.lngLat[1]};${endPoint.lngLat[0]},${endPoint.lngLat[1]}?overview=full&geometries=geojson`;
+      
+      const response = await fetch(url);
+      const data = await response.json();
+
+      if (data.code === "Ok" && data.routes.length > 0) {
+        const route = data.routes[0];
+        const geometry = route.geometry as GeoJSON.LineString;
+
+        setRouteInfo({
+          distance: route.distance,
+          duration: route.duration,
+          geometry,
+        });
+
+        // Draw route on map
+        drawRoute(geometry);
+
+        // Fit map to route
+        const coordinates = geometry.coordinates as [number, number][];
+        const bounds = coordinates.reduce(
+          (bounds, coord) => bounds.extend(coord as maplibregl.LngLatLike),
+          new maplibregl.LngLatBounds(coordinates[0], coordinates[0])
+        );
+        map.current.fitBounds(bounds, { padding: 80, duration: 1000 });
+      }
+    } catch (error) {
+      console.error("Routing error:", error);
+    } finally {
+      setIsCalculatingRoute(false);
+    }
+  };
+
+  const drawRoute = (geometry: GeoJSON.LineString) => {
+    if (!map.current) return;
+
+    // Remove existing route
+    if (map.current.getSource("route")) {
+      map.current.removeLayer("route-line");
+      map.current.removeLayer("route-line-outline");
+      map.current.removeSource("route");
+    }
+
+    // Add route source and layers
+    map.current.addSource("route", {
+      type: "geojson",
+      data: {
+        type: "Feature",
+        properties: {},
+        geometry,
+      },
+    });
+
+    // Route outline
+    map.current.addLayer({
+      id: "route-line-outline",
+      type: "line",
+      source: "route",
+      layout: {
+        "line-join": "round",
+        "line-cap": "round",
+      },
+      paint: {
+        "line-color": "#1e40af",
+        "line-width": 8,
+        "line-opacity": 0.5,
+      },
+    });
+
+    // Route line
+    map.current.addLayer({
+      id: "route-line",
+      type: "line",
+      source: "route",
+      layout: {
+        "line-join": "round",
+        "line-cap": "round",
+      },
+      paint: {
+        "line-color": "#3b82f6",
+        "line-width": 5,
+      },
+    });
+  };
+
+  const clearRoute = () => {
+    if (map.current) {
+      if (map.current.getSource("route")) {
+        map.current.removeLayer("route-line");
+        map.current.removeLayer("route-line-outline");
+        map.current.removeSource("route");
+      }
+    }
+    
+    startMarker.current?.remove();
+    startMarker.current = null;
+    endMarker.current?.remove();
+    endMarker.current = null;
+    
+    setStartPoint(null);
+    setEndPoint(null);
+    setRouteInfo(null);
+    setSelectingPoint("start");
+  };
+
+  const toggleRoutingMode = () => {
+    if (isRoutingMode) {
+      setIsRoutingMode(false);
+      clearRoute();
+      setSelectingPoint(null);
+    } else {
+      setIsRoutingMode(true);
+      setSelectingPoint("start");
+    }
+  };
+
+  const formatDistance = (meters: number) => {
+    if (meters >= 1000) {
+      return `${(meters / 1000).toFixed(1)} km`;
+    }
+    return `${Math.round(meters)} m`;
+  };
+
+  const formatDuration = (seconds: number) => {
+    const hours = Math.floor(seconds / 3600);
+    const minutes = Math.floor((seconds % 3600) / 60);
+    
+    if (hours > 0) {
+      return `${hours}h ${minutes}m`;
+    }
+    return `${minutes} min`;
+  };
+
   // Add city markers
   const addCityMarkers = useCallback(() => {
     if (!map.current) return;
 
-    // Remove existing markers
     markersRef.current.forEach((marker) => marker.remove());
     markersRef.current = [];
 
@@ -116,7 +373,7 @@ const MapViewer = () => {
         <div class="relative group cursor-pointer">
           <div class="absolute -inset-2 bg-emerald-500/30 rounded-full animate-ping"></div>
           <div class="relative w-4 h-4 ${city.type === "capital" ? "bg-amber-500" : "bg-emerald-500"} rounded-full border-2 border-white shadow-lg"></div>
-          <div class="absolute left-1/2 -translate-x-1/2 bottom-full mb-2 opacity-0 group-hover:opacity-100 transition-opacity pointer-events-none whitespace-nowrap">
+          <div class="absolute left-1/2 -translate-x-1/2 bottom-full mb-2 opacity-0 group-hover:opacity-100 transition-opacity pointer-events-none whitespace-nowrap z-50">
             <div class="bg-gray-900/90 text-white text-xs px-2 py-1 rounded shadow-lg">
               ${city.name}${city.type === "capital" ? " ★" : ""}
             </div>
@@ -124,21 +381,40 @@ const MapViewer = () => {
         </div>
       `;
 
+      // Click handler to set as route point
+      el.addEventListener("click", (e) => {
+        if (isRoutingMode && selectingPoint) {
+          e.stopPropagation();
+          if (selectingPoint === "start") {
+            setStartPoint({ lngLat: city.coordinates, name: city.name });
+            setSelectingPoint("end");
+          } else {
+            setEndPoint({ lngLat: city.coordinates, name: city.name });
+            setSelectingPoint(null);
+          }
+        }
+      });
+
       const marker = new maplibregl.Marker({ element: el })
         .setLngLat(city.coordinates)
         .addTo(map.current!);
 
       markersRef.current.push(marker);
     });
-  }, []);
+  }, [isRoutingMode, selectingPoint]);
 
-  // Change map style
+  // Re-add markers when routing mode changes
+  useEffect(() => {
+    if (map.current?.isStyleLoaded()) {
+      addCityMarkers();
+    }
+  }, [isRoutingMode, selectingPoint, addCityMarkers]);
+
   const handleStyleChange = (style: MapStyle) => {
     if (!map.current) return;
     setActiveStyle(style);
     map.current.setStyle(mapStyles[style].url);
     
-    // Re-add markers after style change
     map.current.once("styledata", () => {
       addCityMarkers();
       if (userMarker.current) {
@@ -146,10 +422,13 @@ const MapViewer = () => {
         userMarker.current.remove();
         userMarker.current = createUserMarker(lngLat);
       }
+      // Redraw route if exists
+      if (routeInfo) {
+        setTimeout(() => drawRoute(routeInfo.geometry), 100);
+      }
     });
   };
 
-  // Create user location marker
   const createUserMarker = (lngLat: maplibregl.LngLatLike) => {
     const el = document.createElement("div");
     el.innerHTML = `
@@ -166,11 +445,9 @@ const MapViewer = () => {
       .addTo(map.current!);
   };
 
-  // Zoom controls
   const handleZoomIn = () => map.current?.zoomIn({ duration: 300 });
   const handleZoomOut = () => map.current?.zoomOut({ duration: 300 });
 
-  // Reset view to Pakistan
   const handleResetView = () => {
     map.current?.flyTo({
       center: [69.3451, 30.3753],
@@ -181,12 +458,10 @@ const MapViewer = () => {
     });
   };
 
-  // Reset bearing (north up)
   const handleResetNorth = () => {
     map.current?.easeTo({ bearing: 0, duration: 300 });
   };
 
-  // Get user location
   const handleLocateUser = () => {
     if (!navigator.geolocation) {
       setLocationError("Geolocation is not supported");
@@ -201,15 +476,12 @@ const MapViewer = () => {
         const { longitude, latitude } = position.coords;
         
         if (map.current) {
-          // Remove existing user marker
           if (userMarker.current) {
             userMarker.current.remove();
           }
 
-          // Add new user marker
           userMarker.current = createUserMarker([longitude, latitude]);
 
-          // Fly to user location
           map.current.flyTo({
             center: [longitude, latitude],
             zoom: 14,
@@ -231,7 +503,6 @@ const MapViewer = () => {
     );
   };
 
-  // Toggle fullscreen
   const handleFullscreen = () => {
     if (mapContainer.current) {
       if (document.fullscreenElement) {
@@ -257,11 +528,11 @@ const MapViewer = () => {
             Live Map Platform
           </span>
           <h2 className="text-3xl md:text-4xl font-bold text-secondary-foreground mb-4">
-            Interactive Map Viewer
+            Interactive Map with Navigation
           </h2>
           <p className="text-muted-foreground max-w-2xl mx-auto">
-            Real-time tile rendering with MapLibre GL JS. Pan, zoom, and explore Pakistan's geography 
-            with smooth controls and GPS location support.
+            Real-time routing with distance and ETA calculation. Click the route button, 
+            select start and end points, and get instant navigation.
           </p>
         </motion.div>
 
@@ -281,9 +552,14 @@ const MapViewer = () => {
                 <div className="w-3 h-3 rounded-full bg-gold" />
                 <div className="w-3 h-3 rounded-full bg-primary" />
               </div>
-              <span className="text-white/80 text-sm font-medium">NPMI Map Viewer v2.0</span>
+              <span className="text-white/80 text-sm font-medium">NPMI Navigator v2.0</span>
             </div>
             <div className="flex items-center gap-4">
+              {isRoutingMode && (
+                <span className="text-xs text-primary bg-primary/20 px-2 py-1 rounded-full">
+                  Routing Mode
+                </span>
+              )}
               <span className="text-xs text-white/50 hidden sm:block">
                 Zoom: {zoom.toFixed(1)}x
               </span>
@@ -292,9 +568,218 @@ const MapViewer = () => {
           </div>
 
           {/* Map Content */}
-          <div className="relative h-[550px]">
+          <div className="relative h-[600px]">
             {/* MapLibre Map */}
-            <div ref={mapContainer} className="absolute inset-0" />
+            <div 
+              ref={mapContainer} 
+              className={`absolute inset-0 ${isRoutingMode && selectingPoint ? "cursor-crosshair" : ""}`} 
+            />
+
+            {/* Routing Panel */}
+            <AnimatePresence>
+              {isRoutingMode && (
+                <motion.div
+                  initial={{ x: -300, opacity: 0 }}
+                  animate={{ x: 0, opacity: 1 }}
+                  exit={{ x: -300, opacity: 0 }}
+                  transition={{ type: "spring", damping: 25 }}
+                  className="absolute left-4 top-4 w-72 bg-white/95 backdrop-blur-sm rounded-xl shadow-xl border border-gray-200 overflow-hidden z-20"
+                >
+                  {/* Panel Header */}
+                  <div className="flex items-center justify-between px-4 py-3 bg-primary text-white">
+                    <div className="flex items-center gap-2">
+                      <Route className="w-5 h-5" />
+                      <span className="font-semibold">Route Planner</span>
+                    </div>
+                    <button
+                      onClick={toggleRoutingMode}
+                      className="p-1 hover:bg-white/20 rounded transition-colors"
+                    >
+                      <X className="w-4 h-4" />
+                    </button>
+                  </div>
+
+                  {/* Travel Mode Selector */}
+                  <div className="p-3 border-b border-gray-100">
+                    <div className="flex gap-1 bg-gray-100 rounded-lg p-1">
+                      {(Object.keys(travelModes) as TravelMode[]).map((mode) => {
+                        const Icon = travelModes[mode].icon;
+                        return (
+                          <button
+                            key={mode}
+                            onClick={() => setTravelMode(mode)}
+                            className={`flex-1 flex items-center justify-center gap-1 py-2 rounded-md text-xs font-medium transition-all ${
+                              travelMode === mode
+                                ? "bg-white shadow text-primary"
+                                : "text-gray-600 hover:text-gray-900"
+                            }`}
+                          >
+                            <Icon className="w-4 h-4" />
+                            <span className="hidden sm:inline">{travelModes[mode].name}</span>
+                          </button>
+                        );
+                      })}
+                    </div>
+                  </div>
+
+                  {/* Route Points */}
+                  <div className="p-3 space-y-3">
+                    {/* Start Point */}
+                    <div 
+                      className={`flex items-center gap-3 p-3 rounded-lg border-2 transition-all cursor-pointer ${
+                        selectingPoint === "start" 
+                          ? "border-emerald-500 bg-emerald-50" 
+                          : startPoint 
+                            ? "border-emerald-200 bg-emerald-50/50" 
+                            : "border-gray-200 hover:border-gray-300"
+                      }`}
+                      onClick={() => !startPoint && setSelectingPoint("start")}
+                    >
+                      <div className="w-8 h-8 bg-emerald-500 rounded-full flex items-center justify-center text-white font-bold text-sm">
+                        A
+                      </div>
+                      <div className="flex-1 min-w-0">
+                        <div className="text-xs text-gray-500">Start Point</div>
+                        <div className="text-sm font-medium truncate">
+                          {startPoint?.name || (selectingPoint === "start" ? "Click on map..." : "Select start")}
+                        </div>
+                      </div>
+                      {startPoint && (
+                        <button
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            setStartPoint(null);
+                            setSelectingPoint("start");
+                          }}
+                          className="p-1 hover:bg-gray-200 rounded"
+                        >
+                          <X className="w-4 h-4 text-gray-400" />
+                        </button>
+                      )}
+                    </div>
+
+                    {/* Connector Line */}
+                    <div className="flex justify-center">
+                      <div className="w-0.5 h-4 bg-gray-300" />
+                    </div>
+
+                    {/* End Point */}
+                    <div 
+                      className={`flex items-center gap-3 p-3 rounded-lg border-2 transition-all cursor-pointer ${
+                        selectingPoint === "end" 
+                          ? "border-red-500 bg-red-50" 
+                          : endPoint 
+                            ? "border-red-200 bg-red-50/50" 
+                            : "border-gray-200 hover:border-gray-300"
+                      }`}
+                      onClick={() => startPoint && !endPoint && setSelectingPoint("end")}
+                    >
+                      <div className="w-8 h-8 bg-red-500 rounded-full flex items-center justify-center text-white font-bold text-sm">
+                        B
+                      </div>
+                      <div className="flex-1 min-w-0">
+                        <div className="text-xs text-gray-500">End Point</div>
+                        <div className="text-sm font-medium truncate">
+                          {endPoint?.name || (selectingPoint === "end" ? "Click on map..." : "Select destination")}
+                        </div>
+                      </div>
+                      {endPoint && (
+                        <button
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            setEndPoint(null);
+                            setSelectingPoint("end");
+                          }}
+                          className="p-1 hover:bg-gray-200 rounded"
+                        >
+                          <X className="w-4 h-4 text-gray-400" />
+                        </button>
+                      )}
+                    </div>
+                  </div>
+
+                  {/* Route Info */}
+                  <AnimatePresence>
+                    {(isCalculatingRoute || routeInfo) && (
+                      <motion.div
+                        initial={{ height: 0, opacity: 0 }}
+                        animate={{ height: "auto", opacity: 1 }}
+                        exit={{ height: 0, opacity: 0 }}
+                        className="border-t border-gray-100 overflow-hidden"
+                      >
+                        {isCalculatingRoute ? (
+                          <div className="p-4 flex items-center justify-center gap-2 text-gray-500">
+                            <Loader2 className="w-5 h-5 animate-spin" />
+                            <span className="text-sm">Calculating route...</span>
+                          </div>
+                        ) : routeInfo && (
+                          <div className="p-4 bg-gradient-to-r from-blue-50 to-indigo-50">
+                            <div className="grid grid-cols-2 gap-4">
+                              <div className="flex items-center gap-2">
+                                <div className="p-2 bg-blue-100 rounded-lg">
+                                  <Ruler className="w-5 h-5 text-blue-600" />
+                                </div>
+                                <div>
+                                  <div className="text-xs text-gray-500">Distance</div>
+                                  <div className="text-lg font-bold text-gray-900">
+                                    {formatDistance(routeInfo.distance)}
+                                  </div>
+                                </div>
+                              </div>
+                              <div className="flex items-center gap-2">
+                                <div className="p-2 bg-green-100 rounded-lg">
+                                  <Clock className="w-5 h-5 text-green-600" />
+                                </div>
+                                <div>
+                                  <div className="text-xs text-gray-500">ETA</div>
+                                  <div className="text-lg font-bold text-gray-900">
+                                    {formatDuration(routeInfo.duration)}
+                                  </div>
+                                </div>
+                              </div>
+                            </div>
+                          </div>
+                        )}
+                      </motion.div>
+                    )}
+                  </AnimatePresence>
+
+                  {/* Clear Button */}
+                  {(startPoint || endPoint) && (
+                    <div className="p-3 border-t border-gray-100">
+                      <button
+                        onClick={clearRoute}
+                        className="w-full flex items-center justify-center gap-2 py-2 text-sm font-medium text-gray-600 hover:text-gray-900 hover:bg-gray-100 rounded-lg transition-colors"
+                      >
+                        <RotateCcw className="w-4 h-4" />
+                        Clear Route
+                      </button>
+                    </div>
+                  )}
+                </motion.div>
+              )}
+            </AnimatePresence>
+
+            {/* Layer Controls (only show when not routing) */}
+            {!isRoutingMode && (
+              <div className="absolute left-4 top-4 z-10">
+                <div className="bg-white/95 backdrop-blur-sm rounded-lg p-1 flex flex-col gap-1 shadow-lg border border-gray-200">
+                  {(Object.keys(mapStyles) as MapStyle[]).map((style) => (
+                    <button
+                      key={style}
+                      onClick={() => handleStyleChange(style)}
+                      className={`px-4 py-2 rounded-md text-xs font-medium transition-all ${
+                        activeStyle === style
+                          ? "bg-primary text-white"
+                          : "hover:bg-gray-100 text-gray-700"
+                      }`}
+                    >
+                      {mapStyles[style].name}
+                    </button>
+                  ))}
+                </div>
+              </div>
+            )}
 
             {/* Zoom Controls */}
             <div className="absolute right-4 top-4 flex flex-col gap-2 z-10">
@@ -328,27 +813,20 @@ const MapViewer = () => {
               </button>
             </div>
 
-            {/* Layer Controls */}
-            <div className="absolute left-4 top-4 z-10">
-              <div className="bg-white/95 backdrop-blur-sm rounded-lg p-1 flex flex-col gap-1 shadow-lg border border-gray-200">
-                {(Object.keys(mapStyles) as MapStyle[]).map((style) => (
-                  <button
-                    key={style}
-                    onClick={() => handleStyleChange(style)}
-                    className={`px-4 py-2 rounded-md text-xs font-medium transition-all ${
-                      activeStyle === style
-                        ? "bg-primary text-white"
-                        : "hover:bg-gray-100 text-gray-700"
-                    }`}
-                  >
-                    {mapStyles[style].name}
-                  </button>
-                ))}
-              </div>
-            </div>
-
             {/* Navigation Controls */}
             <div className="absolute left-4 bottom-20 flex flex-col gap-2 z-10">
+              {/* Route Button */}
+              <button
+                onClick={toggleRoutingMode}
+                className={`p-2.5 backdrop-blur-sm rounded-lg shadow-lg transition-all border ${
+                  isRoutingMode 
+                    ? "bg-primary text-white border-primary" 
+                    : "bg-white/95 border-gray-200 hover:bg-primary hover:text-white"
+                }`}
+                title="Route Planner"
+              >
+                <Route className="w-5 h-5" />
+              </button>
               <button
                 onClick={handleLocateUser}
                 disabled={isLocating}
@@ -399,13 +877,29 @@ const MapViewer = () => {
 
           {/* Map Footer */}
           <div className="px-4 py-2 bg-muted/50 border-t border-border flex items-center justify-between text-xs text-muted-foreground">
-            <span>© OpenStreetMap contributors | CARTO Basemaps</span>
+            <span>© OpenStreetMap contributors | CARTO Basemaps | OSRM Routing</span>
             <span>Powered by MapLibre GL JS</span>
+          </div>
+        </motion.div>
+
+        {/* Instructions */}
+        <motion.div
+          initial={{ opacity: 0 }}
+          whileInView={{ opacity: 1 }}
+          viewport={{ once: true }}
+          transition={{ delay: 0.3 }}
+          className="mt-8 text-center"
+        >
+          <div className="inline-flex items-center gap-3 px-6 py-3 rounded-xl bg-card border border-border">
+            <Route className="w-5 h-5 text-primary" />
+            <span className="text-sm text-muted-foreground">
+              Click the <strong className="text-foreground">Route</strong> button, then click on the map or city markers to set start (A) and end (B) points
+            </span>
           </div>
         </motion.div>
       </div>
 
-      {/* Custom marker styles */}
+      {/* Custom styles */}
       <style>{`
         .city-marker .animate-ping {
           animation: ping 2s cubic-bezier(0, 0, 0.2, 1) infinite;
