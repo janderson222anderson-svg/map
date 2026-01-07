@@ -21,6 +21,20 @@ import {
   Bike,
   Footprints,
   RotateCcw,
+  Volume2,
+  VolumeX,
+  ChevronRight,
+  ArrowUp,
+  ArrowLeft,
+  ArrowRight,
+  CornerUpLeft,
+  CornerUpRight,
+  RotateCw,
+  CircleDot,
+  Flag,
+  List,
+  ChevronDown,
+  ChevronUp,
 } from "lucide-react";
 
 type MapStyle = "streets" | "satellite" | "terrain";
@@ -59,6 +73,19 @@ const pakistanCities = [
   { name: "Rawalpindi", coordinates: [73.0169, 33.5651] as [number, number], type: "city" },
 ];
 
+// Navigation step interface
+interface NavigationStep {
+  instruction: string;
+  distance: number;
+  duration: number;
+  maneuver: {
+    type: string;
+    modifier?: string;
+    location: [number, number];
+  };
+  name: string;
+}
+
 interface RoutePoint {
   lngLat: [number, number];
   name?: string;
@@ -68,6 +95,96 @@ interface RouteInfo {
   distance: number; // in meters
   duration: number; // in seconds
   geometry: GeoJSON.LineString;
+  steps: NavigationStep[];
+}
+
+// Get icon for maneuver type
+const getManeuverIcon = (type: string, modifier?: string) => {
+  switch (type) {
+    case "turn":
+      if (modifier?.includes("left")) return ArrowLeft;
+      if (modifier?.includes("right")) return ArrowRight;
+      return ArrowUp;
+    case "new name":
+    case "continue":
+      return ArrowUp;
+    case "merge":
+    case "on ramp":
+    case "off ramp":
+      if (modifier?.includes("left")) return CornerUpLeft;
+      if (modifier?.includes("right")) return CornerUpRight;
+      return ArrowUp;
+    case "fork":
+      if (modifier?.includes("left")) return CornerUpLeft;
+      if (modifier?.includes("right")) return CornerUpRight;
+      return ArrowUp;
+    case "end of road":
+      if (modifier?.includes("left")) return ArrowLeft;
+      if (modifier?.includes("right")) return ArrowRight;
+      return ArrowUp;
+    case "roundabout":
+    case "rotary":
+      return RotateCw;
+    case "depart":
+      return CircleDot;
+    case "arrive":
+      return Flag;
+    default:
+      return ChevronRight;
+  }
+};
+
+// Voice guidance class
+class VoiceGuidance {
+  private synth: SpeechSynthesis;
+  private enabled: boolean = true;
+  private speaking: boolean = false;
+
+  constructor() {
+    this.synth = window.speechSynthesis;
+  }
+
+  speak(text: string) {
+    if (!this.enabled || this.speaking) return;
+    
+    // Cancel any ongoing speech
+    this.synth.cancel();
+    
+    const utterance = new SpeechSynthesisUtterance(text);
+    utterance.rate = 0.9;
+    utterance.pitch = 1;
+    utterance.volume = 1;
+    
+    // Try to find a good English voice
+    const voices = this.synth.getVoices();
+    const englishVoice = voices.find(v => v.lang.startsWith('en')) || voices[0];
+    if (englishVoice) {
+      utterance.voice = englishVoice;
+    }
+    
+    utterance.onstart = () => { this.speaking = true; };
+    utterance.onend = () => { this.speaking = false; };
+    utterance.onerror = () => { this.speaking = false; };
+    
+    this.synth.speak(utterance);
+  }
+
+  toggle() {
+    this.enabled = !this.enabled;
+    if (!this.enabled) {
+      this.synth.cancel();
+    }
+    return this.enabled;
+  }
+
+  isEnabled() {
+    return this.enabled;
+  }
+
+  stop() {
+    this.synth.cancel();
+    this.speaking = false;
+  }
 }
 
 const MapViewer = () => {
@@ -77,6 +194,7 @@ const MapViewer = () => {
   const startMarker = useRef<maplibregl.Marker | null>(null);
   const endMarker = useRef<maplibregl.Marker | null>(null);
   const markersRef = useRef<maplibregl.Marker[]>([]);
+  const voiceGuidance = useRef<VoiceGuidance | null>(null);
 
   const [activeStyle, setActiveStyle] = useState<MapStyle>("streets");
   const [zoom, setZoom] = useState(5);
@@ -92,6 +210,19 @@ const MapViewer = () => {
   const [isCalculatingRoute, setIsCalculatingRoute] = useState(false);
   const [travelMode, setTravelMode] = useState<TravelMode>("driving");
   const [selectingPoint, setSelectingPoint] = useState<"start" | "end" | null>(null);
+  
+  // Navigation state
+  const [voiceEnabled, setVoiceEnabled] = useState(true);
+  const [showSteps, setShowSteps] = useState(false);
+  const [currentStepIndex, setCurrentStepIndex] = useState(0);
+
+  // Initialize voice guidance
+  useEffect(() => {
+    voiceGuidance.current = new VoiceGuidance();
+    return () => {
+      voiceGuidance.current?.stop();
+    };
+  }, []);
 
   // Initialize map
   useEffect(() => {
@@ -226,7 +357,8 @@ const MapViewer = () => {
 
     try {
       const profile = travelModes[travelMode].profile;
-      const url = `https://router.project-osrm.org/route/v1/${profile}/${startPoint.lngLat[0]},${startPoint.lngLat[1]};${endPoint.lngLat[0]},${endPoint.lngLat[1]}?overview=full&geometries=geojson`;
+      // Added steps=true to get turn-by-turn instructions
+      const url = `https://router.project-osrm.org/route/v1/${profile}/${startPoint.lngLat[0]},${startPoint.lngLat[1]};${endPoint.lngLat[0]},${endPoint.lngLat[1]}?overview=full&geometries=geojson&steps=true`;
       
       const response = await fetch(url);
       const data = await response.json();
@@ -234,12 +366,37 @@ const MapViewer = () => {
       if (data.code === "Ok" && data.routes.length > 0) {
         const route = data.routes[0];
         const geometry = route.geometry as GeoJSON.LineString;
+        
+        // Extract navigation steps from legs
+        const steps: NavigationStep[] = [];
+        if (route.legs && route.legs.length > 0) {
+          route.legs.forEach((leg: any) => {
+            if (leg.steps) {
+              leg.steps.forEach((step: any) => {
+                steps.push({
+                  instruction: step.maneuver?.instruction || formatManeuver(step.maneuver?.type, step.maneuver?.modifier, step.name),
+                  distance: step.distance,
+                  duration: step.duration,
+                  maneuver: {
+                    type: step.maneuver?.type || 'continue',
+                    modifier: step.maneuver?.modifier,
+                    location: step.maneuver?.location,
+                  },
+                  name: step.name || 'Unnamed road',
+                });
+              });
+            }
+          });
+        }
 
-        setRouteInfo({
+        const routeData: RouteInfo = {
           distance: route.distance,
           duration: route.duration,
           geometry,
-        });
+          steps,
+        };
+
+        setRouteInfo(routeData);
 
         // Draw route on map
         drawRoute(geometry);
@@ -251,11 +408,48 @@ const MapViewer = () => {
           new maplibregl.LngLatBounds(coordinates[0], coordinates[0])
         );
         map.current.fitBounds(bounds, { padding: 80, duration: 1000 });
+
+        // Announce first step with voice
+        if (steps.length > 0 && voiceGuidance.current?.isEnabled()) {
+          voiceGuidance.current.speak(`Route calculated. ${formatDistance(route.distance)} total. First, ${steps[0].instruction}`);
+        }
       }
     } catch (error) {
       console.error("Routing error:", error);
     } finally {
       setIsCalculatingRoute(false);
+    }
+  };
+
+  // Format maneuver to readable instruction
+  const formatManeuver = (type?: string, modifier?: string, name?: string): string => {
+    const roadName = name ? ` onto ${name}` : '';
+    
+    switch (type) {
+      case 'depart':
+        return `Start${roadName}`;
+      case 'arrive':
+        return 'You have arrived at your destination';
+      case 'turn':
+        return `Turn ${modifier || 'slightly'}${roadName}`;
+      case 'continue':
+      case 'new name':
+        return `Continue${roadName}`;
+      case 'merge':
+        return `Merge ${modifier || ''}${roadName}`;
+      case 'on ramp':
+        return `Take the ramp ${modifier || ''}${roadName}`;
+      case 'off ramp':
+        return `Take the exit${roadName}`;
+      case 'fork':
+        return `Keep ${modifier || 'straight'}${roadName}`;
+      case 'end of road':
+        return `Turn ${modifier || 'left'}${roadName}`;
+      case 'roundabout':
+      case 'rotary':
+        return `Enter the roundabout${roadName}`;
+      default:
+        return `Continue${roadName}`;
     }
   };
 
@@ -329,6 +523,9 @@ const MapViewer = () => {
     setEndPoint(null);
     setRouteInfo(null);
     setSelectingPoint("start");
+    setShowSteps(false);
+    setCurrentStepIndex(0);
+    voiceGuidance.current?.stop();
   };
 
   const toggleRoutingMode = () => {
@@ -339,6 +536,33 @@ const MapViewer = () => {
     } else {
       setIsRoutingMode(true);
       setSelectingPoint("start");
+    }
+  };
+
+  const toggleVoice = () => {
+    if (voiceGuidance.current) {
+      const enabled = voiceGuidance.current.toggle();
+      setVoiceEnabled(enabled);
+    }
+  };
+
+  const speakStep = (step: NavigationStep) => {
+    if (voiceGuidance.current?.isEnabled()) {
+      voiceGuidance.current.speak(`${step.instruction}. ${formatDistance(step.distance)}`);
+    }
+  };
+
+  const goToStep = (index: number, step: NavigationStep) => {
+    setCurrentStepIndex(index);
+    speakStep(step);
+    
+    // Pan map to step location
+    if (map.current && step.maneuver.location) {
+      map.current.flyTo({
+        center: step.maneuver.location as maplibregl.LngLatLike,
+        zoom: 15,
+        duration: 1000,
+      });
     }
   };
 
@@ -713,31 +937,118 @@ const MapViewer = () => {
                             <span className="text-sm">Calculating route...</span>
                           </div>
                         ) : routeInfo && (
-                          <div className="p-4 bg-gradient-to-r from-blue-50 to-indigo-50">
-                            <div className="grid grid-cols-2 gap-4">
-                              <div className="flex items-center gap-2">
-                                <div className="p-2 bg-blue-100 rounded-lg">
-                                  <Ruler className="w-5 h-5 text-blue-600" />
+                          <div>
+                            {/* Distance & ETA */}
+                            <div className="p-4 bg-gradient-to-r from-blue-50 to-indigo-50">
+                              <div className="grid grid-cols-2 gap-4 mb-3">
+                                <div className="flex items-center gap-2">
+                                  <div className="p-2 bg-blue-100 rounded-lg">
+                                    <Ruler className="w-5 h-5 text-blue-600" />
+                                  </div>
+                                  <div>
+                                    <div className="text-xs text-gray-500">Distance</div>
+                                    <div className="text-lg font-bold text-gray-900">
+                                      {formatDistance(routeInfo.distance)}
+                                    </div>
+                                  </div>
                                 </div>
-                                <div>
-                                  <div className="text-xs text-gray-500">Distance</div>
-                                  <div className="text-lg font-bold text-gray-900">
-                                    {formatDistance(routeInfo.distance)}
+                                <div className="flex items-center gap-2">
+                                  <div className="p-2 bg-green-100 rounded-lg">
+                                    <Clock className="w-5 h-5 text-green-600" />
+                                  </div>
+                                  <div>
+                                    <div className="text-xs text-gray-500">ETA</div>
+                                    <div className="text-lg font-bold text-gray-900">
+                                      {formatDuration(routeInfo.duration)}
+                                    </div>
                                   </div>
                                 </div>
                               </div>
-                              <div className="flex items-center gap-2">
-                                <div className="p-2 bg-green-100 rounded-lg">
-                                  <Clock className="w-5 h-5 text-green-600" />
-                                </div>
-                                <div>
-                                  <div className="text-xs text-gray-500">ETA</div>
-                                  <div className="text-lg font-bold text-gray-900">
-                                    {formatDuration(routeInfo.duration)}
-                                  </div>
-                                </div>
+                              
+                              {/* Voice & Steps Controls */}
+                              <div className="flex gap-2">
+                                <button
+                                  onClick={toggleVoice}
+                                  className={`flex-1 flex items-center justify-center gap-2 py-2 rounded-lg text-sm font-medium transition-all ${
+                                    voiceEnabled 
+                                      ? "bg-primary text-white" 
+                                      : "bg-gray-200 text-gray-600"
+                                  }`}
+                                  title={voiceEnabled ? "Disable voice" : "Enable voice"}
+                                >
+                                  {voiceEnabled ? (
+                                    <Volume2 className="w-4 h-4" />
+                                  ) : (
+                                    <VolumeX className="w-4 h-4" />
+                                  )}
+                                  Voice
+                                </button>
+                                <button
+                                  onClick={() => setShowSteps(!showSteps)}
+                                  className="flex-1 flex items-center justify-center gap-2 py-2 bg-gray-100 hover:bg-gray-200 rounded-lg text-sm font-medium text-gray-700 transition-all"
+                                >
+                                  <List className="w-4 h-4" />
+                                  {routeInfo.steps.length} Steps
+                                  {showSteps ? (
+                                    <ChevronUp className="w-4 h-4" />
+                                  ) : (
+                                    <ChevronDown className="w-4 h-4" />
+                                  )}
+                                </button>
                               </div>
                             </div>
+
+                            {/* Navigation Steps List */}
+                            <AnimatePresence>
+                              {showSteps && routeInfo.steps.length > 0 && (
+                                <motion.div
+                                  initial={{ height: 0, opacity: 0 }}
+                                  animate={{ height: "auto", opacity: 1 }}
+                                  exit={{ height: 0, opacity: 0 }}
+                                  className="max-h-64 overflow-y-auto border-t border-gray-100"
+                                >
+                                  {routeInfo.steps.map((step, index) => {
+                                    const StepIcon = getManeuverIcon(step.maneuver.type, step.maneuver.modifier);
+                                    const isActive = index === currentStepIndex;
+                                    
+                                    return (
+                                      <button
+                                        key={index}
+                                        onClick={() => goToStep(index, step)}
+                                        className={`w-full flex items-start gap-3 p-3 text-left hover:bg-gray-50 transition-colors border-b border-gray-50 last:border-b-0 ${
+                                          isActive ? "bg-blue-50" : ""
+                                        }`}
+                                      >
+                                        <div className={`p-2 rounded-lg flex-shrink-0 ${
+                                          isActive ? "bg-primary text-white" : "bg-gray-100 text-gray-600"
+                                        }`}>
+                                          <StepIcon className="w-4 h-4" />
+                                        </div>
+                                        <div className="flex-1 min-w-0">
+                                          <div className={`text-sm font-medium ${isActive ? "text-primary" : "text-gray-900"}`}>
+                                            {step.instruction}
+                                          </div>
+                                          <div className="flex items-center gap-2 mt-1 text-xs text-gray-500">
+                                            <span>{formatDistance(step.distance)}</span>
+                                            <span>•</span>
+                                            <span>{formatDuration(step.duration)}</span>
+                                            {step.name && step.name !== 'Unnamed road' && (
+                                              <>
+                                                <span>•</span>
+                                                <span className="truncate">{step.name}</span>
+                                              </>
+                                            )}
+                                          </div>
+                                        </div>
+                                        {isActive && voiceEnabled && (
+                                          <Volume2 className="w-4 h-4 text-primary flex-shrink-0 animate-pulse" />
+                                        )}
+                                      </button>
+                                    );
+                                  })}
+                                </motion.div>
+                              )}
+                            </AnimatePresence>
                           </div>
                         )}
                       </motion.div>
