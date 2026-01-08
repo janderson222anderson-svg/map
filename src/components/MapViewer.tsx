@@ -35,7 +35,23 @@ import {
   List,
   ChevronDown,
   ChevronUp,
+  Search,
+  Building,
+  Mountain,
+  MapPinned,
+  Landmark,
 } from "lucide-react";
+
+// Search result interface
+interface SearchResult {
+  place_id: number;
+  display_name: string;
+  lat: string;
+  lon: string;
+  type: string;
+  class: string;
+  importance: number;
+}
 
 type MapStyle = "streets" | "satellite" | "terrain";
 type TravelMode = "driving" | "cycling" | "walking";
@@ -215,6 +231,14 @@ const MapViewer = () => {
   const [voiceEnabled, setVoiceEnabled] = useState(true);
   const [showSteps, setShowSteps] = useState(false);
   const [currentStepIndex, setCurrentStepIndex] = useState(0);
+
+  // Search state
+  const [searchQuery, setSearchQuery] = useState("");
+  const [searchResults, setSearchResults] = useState<SearchResult[]>([]);
+  const [isSearching, setIsSearching] = useState(false);
+  const [showSearchResults, setShowSearchResults] = useState(false);
+  const searchTimeoutRef = useRef<NodeJS.Timeout | null>(null);
+  const searchInputRef = useRef<HTMLInputElement>(null);
 
   // Initialize voice guidance
   useEffect(() => {
@@ -546,6 +570,147 @@ const MapViewer = () => {
     }
   };
 
+  // Search functionality with Nominatim API
+  const searchPlaces = useCallback(async (query: string) => {
+    if (query.length < 2) {
+      setSearchResults([]);
+      setShowSearchResults(false);
+      return;
+    }
+
+    setIsSearching(true);
+
+    try {
+      // Use Nominatim API with Pakistan bias
+      const url = `https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(query)}&countrycodes=pk&limit=8&addressdetails=1`;
+      
+      const response = await fetch(url, {
+        headers: {
+          'Accept-Language': 'en',
+        },
+      });
+      
+      const data: SearchResult[] = await response.json();
+      setSearchResults(data);
+      setShowSearchResults(true);
+    } catch (error) {
+      console.error("Search error:", error);
+      setSearchResults([]);
+    } finally {
+      setIsSearching(false);
+    }
+  }, []);
+
+  // Debounced search
+  const handleSearchChange = useCallback((query: string) => {
+    setSearchQuery(query);
+    
+    if (searchTimeoutRef.current) {
+      clearTimeout(searchTimeoutRef.current);
+    }
+
+    if (query.length < 2) {
+      setSearchResults([]);
+      setShowSearchResults(false);
+      return;
+    }
+
+    searchTimeoutRef.current = setTimeout(() => {
+      searchPlaces(query);
+    }, 300);
+  }, [searchPlaces]);
+
+  // Handle search result selection
+  const handleSelectSearchResult = useCallback((result: SearchResult) => {
+    if (!map.current) return;
+
+    const lng = parseFloat(result.lon);
+    const lat = parseFloat(result.lat);
+
+    // If in routing mode, use the result as a route point
+    if (isRoutingMode && selectingPoint) {
+      const point: RoutePoint = {
+        lngLat: [lng, lat],
+        name: result.display_name.split(',')[0],
+      };
+
+      if (selectingPoint === "start") {
+        setStartPoint(point);
+        setSelectingPoint("end");
+      } else {
+        setEndPoint(point);
+        setSelectingPoint(null);
+      }
+    } else {
+      // Otherwise, just fly to the location and add a temporary marker
+      map.current.flyTo({
+        center: [lng, lat],
+        zoom: 14,
+        duration: 1500,
+      });
+
+      // Add a temporary search result marker
+      const el = document.createElement("div");
+      el.innerHTML = `
+        <div class="relative animate-bounce">
+          <div class="w-10 h-10 bg-primary rounded-full flex items-center justify-center shadow-lg border-2 border-white">
+            <svg class="w-5 h-5 text-white" fill="currentColor" viewBox="0 0 24 24">
+              <path d="M12 2C8.13 2 5 5.13 5 9c0 5.25 7 13 7 13s7-7.75 7-13c0-3.87-3.13-7-7-7zm0 9.5c-1.38 0-2.5-1.12-2.5-2.5s1.12-2.5 2.5-2.5 2.5 1.12 2.5 2.5-1.12 2.5-2.5 2.5z"/>
+            </svg>
+          </div>
+          <div class="absolute -bottom-1 left-1/2 -translate-x-1/2 w-3 h-3 bg-primary rotate-45"></div>
+        </div>
+      `;
+      
+      const searchMarker = new maplibregl.Marker({ element: el, anchor: "bottom" })
+        .setLngLat([lng, lat])
+        .setPopup(
+          new maplibregl.Popup({ offset: 25 }).setHTML(`
+            <div class="p-2">
+              <div class="font-semibold text-sm">${result.display_name.split(',')[0]}</div>
+              <div class="text-xs text-gray-500 mt-1">${result.display_name}</div>
+            </div>
+          `)
+        )
+        .addTo(map.current);
+
+      searchMarker.togglePopup();
+
+      // Remove marker after 30 seconds
+      setTimeout(() => {
+        searchMarker.remove();
+      }, 30000);
+    }
+
+    // Clear search
+    setSearchQuery("");
+    setSearchResults([]);
+    setShowSearchResults(false);
+  }, [isRoutingMode, selectingPoint]);
+
+  // Get icon for place type
+  const getPlaceIcon = (type: string, placeClass: string) => {
+    if (placeClass === "building" || type === "house") return Building;
+    if (placeClass === "natural" || type === "peak") return Mountain;
+    if (placeClass === "tourism" || type === "attraction") return Landmark;
+    return MapPinned;
+  };
+
+  // Close search results when clicking outside
+  useEffect(() => {
+    const handleClickOutside = (e: MouseEvent) => {
+      if (searchInputRef.current && !searchInputRef.current.contains(e.target as Node)) {
+        const resultsPanel = document.getElementById('search-results-panel');
+        if (resultsPanel && !resultsPanel.contains(e.target as Node)) {
+          setShowSearchResults(false);
+        }
+      }
+    };
+
+    document.addEventListener('mousedown', handleClickOutside);
+    return () => document.removeEventListener('mousedown', handleClickOutside);
+  }, []);
+
   const speakStep = (step: NavigationStep) => {
     if (voiceGuidance.current?.isEnabled()) {
       voiceGuidance.current.speak(`${step.instruction}. ${formatDistance(step.distance)}`);
@@ -798,6 +963,106 @@ const MapViewer = () => {
               ref={mapContainer} 
               className={`absolute inset-0 ${isRoutingMode && selectingPoint ? "cursor-crosshair" : ""}`} 
             />
+
+            {/* Search Bar */}
+            <div className="absolute top-4 left-1/2 -translate-x-1/2 z-30 w-full max-w-md px-4">
+              <div className="relative">
+                <div className="relative flex items-center">
+                  <Search className="absolute left-3 w-5 h-5 text-gray-400 pointer-events-none" />
+                  <input
+                    ref={searchInputRef}
+                    type="text"
+                    value={searchQuery}
+                    onChange={(e) => handleSearchChange(e.target.value)}
+                    onFocus={() => searchResults.length > 0 && setShowSearchResults(true)}
+                    placeholder={isRoutingMode && selectingPoint 
+                      ? `Search for ${selectingPoint === 'start' ? 'start' : 'destination'} point...`
+                      : "Search places, roads, landmarks in Pakistan..."
+                    }
+                    className="w-full pl-10 pr-10 py-3 bg-white/95 backdrop-blur-sm rounded-xl shadow-lg border border-gray-200 text-sm focus:outline-none focus:ring-2 focus:ring-primary/50 focus:border-primary placeholder:text-gray-400"
+                  />
+                  {isSearching && (
+                    <Loader2 className="absolute right-3 w-5 h-5 text-primary animate-spin" />
+                  )}
+                  {!isSearching && searchQuery && (
+                    <button
+                      onClick={() => {
+                        setSearchQuery("");
+                        setSearchResults([]);
+                        setShowSearchResults(false);
+                      }}
+                      className="absolute right-3 p-0.5 hover:bg-gray-100 rounded"
+                    >
+                      <X className="w-4 h-4 text-gray-400" />
+                    </button>
+                  )}
+                </div>
+
+                {/* Search Results Dropdown */}
+                <AnimatePresence>
+                  {showSearchResults && searchResults.length > 0 && (
+                    <motion.div
+                      id="search-results-panel"
+                      initial={{ opacity: 0, y: -10 }}
+                      animate={{ opacity: 1, y: 0 }}
+                      exit={{ opacity: 0, y: -10 }}
+                      className="absolute top-full left-0 right-0 mt-2 bg-white/95 backdrop-blur-sm rounded-xl shadow-xl border border-gray-200 overflow-hidden max-h-80 overflow-y-auto"
+                    >
+                      {searchResults.map((result) => {
+                        const PlaceIcon = getPlaceIcon(result.type, result.class);
+                        return (
+                          <button
+                            key={result.place_id}
+                            onClick={() => handleSelectSearchResult(result)}
+                            className="w-full flex items-start gap-3 p-3 hover:bg-gray-50 transition-colors text-left border-b border-gray-100 last:border-b-0"
+                          >
+                            <div className="p-2 bg-primary/10 rounded-lg flex-shrink-0">
+                              <PlaceIcon className="w-4 h-4 text-primary" />
+                            </div>
+                            <div className="flex-1 min-w-0">
+                              <div className="text-sm font-medium text-gray-900 truncate">
+                                {result.display_name.split(',')[0]}
+                              </div>
+                              <div className="text-xs text-gray-500 truncate mt-0.5">
+                                {result.display_name.split(',').slice(1, 3).join(',')}
+                              </div>
+                              <div className="text-xs text-primary/70 mt-1 capitalize">
+                                {result.type.replace(/_/g, ' ')}
+                              </div>
+                            </div>
+                            {isRoutingMode && selectingPoint && (
+                              <div className={`px-2 py-1 text-xs font-medium rounded ${
+                                selectingPoint === 'start' 
+                                  ? 'bg-emerald-100 text-emerald-700' 
+                                  : 'bg-red-100 text-red-700'
+                              }`}>
+                                Set as {selectingPoint === 'start' ? 'A' : 'B'}
+                              </div>
+                            )}
+                          </button>
+                        );
+                      })}
+                    </motion.div>
+                  )}
+                </AnimatePresence>
+
+                {/* No Results Message */}
+                <AnimatePresence>
+                  {showSearchResults && searchQuery.length >= 2 && searchResults.length === 0 && !isSearching && (
+                    <motion.div
+                      initial={{ opacity: 0, y: -10 }}
+                      animate={{ opacity: 1, y: 0 }}
+                      exit={{ opacity: 0, y: -10 }}
+                      className="absolute top-full left-0 right-0 mt-2 bg-white/95 backdrop-blur-sm rounded-xl shadow-xl border border-gray-200 p-4 text-center"
+                    >
+                      <MapPin className="w-8 h-8 text-gray-300 mx-auto mb-2" />
+                      <p className="text-sm text-gray-500">No places found for "{searchQuery}"</p>
+                      <p className="text-xs text-gray-400 mt-1">Try a different search term</p>
+                    </motion.div>
+                  )}
+                </AnimatePresence>
+              </div>
+            </div>
 
             {/* Routing Panel */}
             <AnimatePresence>
@@ -1073,7 +1338,7 @@ const MapViewer = () => {
 
             {/* Layer Controls (only show when not routing) */}
             {!isRoutingMode && (
-              <div className="absolute left-4 top-4 z-10">
+              <div className="absolute left-4 top-20 z-10">
                 <div className="bg-white/95 backdrop-blur-sm rounded-lg p-1 flex flex-col gap-1 shadow-lg border border-gray-200">
                   {(Object.keys(mapStyles) as MapStyle[]).map((style) => (
                     <button
@@ -1093,7 +1358,7 @@ const MapViewer = () => {
             )}
 
             {/* Zoom Controls */}
-            <div className="absolute right-4 top-4 flex flex-col gap-2 z-10">
+            <div className="absolute right-4 top-20 flex flex-col gap-2 z-10">
               <button
                 onClick={handleZoomIn}
                 className="p-2.5 bg-white/95 backdrop-blur-sm rounded-lg shadow-lg hover:bg-primary hover:text-white transition-all border border-gray-200"
@@ -1201,11 +1466,20 @@ const MapViewer = () => {
           transition={{ delay: 0.3 }}
           className="mt-8 text-center"
         >
-          <div className="inline-flex items-center gap-3 px-6 py-3 rounded-xl bg-card border border-border">
-            <Route className="w-5 h-5 text-primary" />
-            <span className="text-sm text-muted-foreground">
-              Click the <strong className="text-foreground">Route</strong> button, then click on the map or city markers to set start (A) and end (B) points
-            </span>
+          <div className="inline-flex flex-wrap items-center justify-center gap-3 px-6 py-3 rounded-xl bg-card border border-border">
+            <div className="flex items-center gap-2">
+              <Search className="w-5 h-5 text-primary" />
+              <span className="text-sm text-muted-foreground">
+                <strong className="text-foreground">Search</strong> for any place in Pakistan
+              </span>
+            </div>
+            <span className="text-muted-foreground hidden sm:inline">•</span>
+            <div className="flex items-center gap-2">
+              <Route className="w-5 h-5 text-primary" />
+              <span className="text-sm text-muted-foreground">
+                Use <strong className="text-foreground">Route</strong> to plan navigation
+              </span>
+            </div>
           </div>
         </motion.div>
       </div>
