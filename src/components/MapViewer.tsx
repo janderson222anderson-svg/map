@@ -54,8 +54,10 @@ import {
   Square,
   Trash2,
   TrendingUp,
+  CloudSun,
 } from "lucide-react";
 import ElevationProfile from "./ElevationProfile";
+import WeatherOverlay, { WeatherData } from "./WeatherOverlay";
 
 // Search result interface
 interface SearchResult {
@@ -305,6 +307,13 @@ const MapViewer = () => {
   const [showElevationProfile, setShowElevationProfile] = useState(false);
   const [elevationData, setElevationData] = useState<ElevationPoint[]>([]);
   const [isLoadingElevation, setIsLoadingElevation] = useState(false);
+
+  // Weather overlay state
+  const [showWeatherOverlay, setShowWeatherOverlay] = useState(false);
+  const [weatherData, setWeatherData] = useState<WeatherData[]>([]);
+  const [isLoadingWeather, setIsLoadingWeather] = useState(false);
+  const [selectedWeatherIndex, setSelectedWeatherIndex] = useState(0);
+  const weatherMarkersRef = useRef<maplibregl.Marker[]>([]);
 
   // Initialize voice guidance
   useEffect(() => {
@@ -1215,6 +1224,145 @@ const MapViewer = () => {
     }
   }, [showElevationProfile, routeInfo, fetchElevationData]);
 
+  // Fetch weather data for route points
+  const fetchWeatherData = useCallback(async (coordinates: [number, number][]) => {
+    if (coordinates.length < 2) return;
+
+    setIsLoadingWeather(true);
+    setShowWeatherOverlay(true);
+
+    try {
+      // Sample 3-5 points along the route (start, middle points, end)
+      const numPoints = Math.min(5, Math.max(3, Math.floor(coordinates.length / 20)));
+      const step = Math.floor(coordinates.length / (numPoints - 1));
+      const samplePoints = Array.from({ length: numPoints }, (_, i) => 
+        i === numPoints - 1 ? coordinates[coordinates.length - 1] : coordinates[i * step]
+      );
+
+      const weatherPromises = samplePoints.map(async (coord, index): Promise<WeatherData> => {
+        const [lng, lat] = coord;
+        
+        // Fetch current and hourly weather from Open-Meteo
+        const response = await fetch(
+          `https://api.open-meteo.com/v1/forecast?latitude=${lat}&longitude=${lng}&current=temperature_2m,weather_code,wind_speed_10m,relative_humidity_2m,visibility,pressure_msl&hourly=temperature_2m,weather_code,precipitation_probability&timezone=auto&forecast_days=1`
+        );
+        
+        const data = await response.json();
+        
+        // Get location name via reverse geocoding
+        let locationName = `Point ${index + 1}`;
+        try {
+          const geoResponse = await fetch(
+            `https://nominatim.openstreetmap.org/reverse?format=json&lat=${lat}&lon=${lng}&zoom=10`
+          );
+          const geoData = await geoResponse.json();
+          locationName = geoData.address?.city || geoData.address?.town || 
+                        geoData.address?.village || geoData.address?.county || 
+                        `Point ${index + 1}`;
+        } catch {
+          // Keep default name
+        }
+
+        return {
+          location: index === 0 ? `Start: ${locationName}` : 
+                   index === numPoints - 1 ? `End: ${locationName}` : 
+                   locationName,
+          coordinates: coord,
+          current: {
+            temperature: data.current?.temperature_2m || 0,
+            weatherCode: data.current?.weather_code || 0,
+            windSpeed: data.current?.wind_speed_10m || 0,
+            humidity: data.current?.relative_humidity_2m || 0,
+            visibility: data.current?.visibility || 10000,
+            pressure: data.current?.pressure_msl || 1013,
+          },
+          hourly: (data.hourly?.time || []).map((time: string, i: number) => ({
+            time,
+            temperature: data.hourly?.temperature_2m?.[i] || 0,
+            weatherCode: data.hourly?.weather_code?.[i] || 0,
+            precipitationProbability: data.hourly?.precipitation_probability?.[i] || 0,
+          })),
+        };
+      });
+
+      const results = await Promise.all(weatherPromises);
+      setWeatherData(results);
+      setSelectedWeatherIndex(0);
+
+      // Add weather markers to map
+      addWeatherMarkers(results);
+    } catch (error) {
+      console.error("Error fetching weather data:", error);
+      setWeatherData([]);
+    } finally {
+      setIsLoadingWeather(false);
+    }
+  }, []);
+
+  // Add weather markers to map
+  const addWeatherMarkers = useCallback((weather: WeatherData[]) => {
+    if (!map.current) return;
+
+    // Clear existing markers
+    weatherMarkersRef.current.forEach(marker => marker.remove());
+    weatherMarkersRef.current = [];
+
+    weather.forEach((data, index) => {
+      const el = document.createElement("div");
+      const temp = Math.round(data.current.temperature);
+      const code = data.current.weatherCode;
+      
+      // Get weather icon SVG
+      let iconSvg = "☀️";
+      if (code >= 1 && code <= 3) iconSvg = "⛅";
+      else if (code >= 45 && code <= 48) iconSvg = "🌫️";
+      else if (code >= 51 && code <= 67) iconSvg = "🌧️";
+      else if (code >= 71 && code <= 77) iconSvg = "❄️";
+      else if (code >= 80 && code <= 86) iconSvg = "🌧️";
+      else if (code >= 95) iconSvg = "⛈️";
+
+      el.innerHTML = `
+        <div class="flex flex-col items-center cursor-pointer transform hover:scale-110 transition-transform">
+          <div class="bg-white rounded-lg shadow-lg px-2 py-1 border border-gray-200">
+            <div class="text-lg">${iconSvg}</div>
+            <div class="text-xs font-bold text-gray-800">${temp}°</div>
+          </div>
+          <div class="w-0 h-0 border-l-[6px] border-r-[6px] border-t-[8px] border-l-transparent border-r-transparent border-t-white" style="filter: drop-shadow(0 1px 1px rgba(0,0,0,0.1))"></div>
+        </div>
+      `;
+
+      const marker = new maplibregl.Marker({ element: el, anchor: "bottom" })
+        .setLngLat(data.coordinates)
+        .setPopup(
+          new maplibregl.Popup({ offset: 25 }).setHTML(`
+            <div class="p-2 min-w-[150px]">
+              <div class="font-semibold text-sm mb-1">${data.location}</div>
+              <div class="text-2xl font-bold">${temp}°C</div>
+              <div class="text-xs text-gray-500 mt-1">
+                Wind: ${data.current.windSpeed} km/h<br/>
+                Humidity: ${data.current.humidity}%
+              </div>
+            </div>
+          `)
+        )
+        .addTo(map.current!);
+
+      el.addEventListener("click", () => setSelectedWeatherIndex(index));
+      weatherMarkersRef.current.push(marker);
+    });
+  }, []);
+
+  // Toggle weather overlay
+  const toggleWeatherOverlay = useCallback(() => {
+    if (showWeatherOverlay) {
+      setShowWeatherOverlay(false);
+      weatherMarkersRef.current.forEach(marker => marker.remove());
+      weatherMarkersRef.current = [];
+    } else if (routeInfo && routeInfo.geometry.coordinates.length > 0) {
+      fetchWeatherData(routeInfo.geometry.coordinates as [number, number][]);
+    }
+  }, [showWeatherOverlay, routeInfo, fetchWeatherData]);
+
   const clearRoute = () => {
     if (map.current) {
       if (map.current.getSource("route")) {
@@ -1240,6 +1388,12 @@ const MapViewer = () => {
     // Clear elevation data
     setShowElevationProfile(false);
     setElevationData([]);
+
+    // Clear weather data
+    setShowWeatherOverlay(false);
+    setWeatherData([]);
+    weatherMarkersRef.current.forEach(marker => marker.remove());
+    weatherMarkersRef.current = [];
   };
 
   const toggleRoutingMode = () => {
@@ -2129,23 +2283,41 @@ const MapViewer = () => {
                                 </button>
                               </div>
 
-                              {/* Elevation Profile Button */}
-                              <button
-                                onClick={toggleElevationProfile}
-                                disabled={isLoadingElevation}
-                                className={`w-full flex items-center justify-center gap-2 py-2.5 rounded-lg text-sm font-medium transition-all ${
-                                  showElevationProfile 
-                                    ? "bg-emerald-500 text-white" 
-                                    : "bg-emerald-50 text-emerald-700 hover:bg-emerald-100"
-                                }`}
-                              >
-                                {isLoadingElevation ? (
-                                  <Loader2 className="w-4 h-4 animate-spin" />
-                                ) : (
-                                  <TrendingUp className="w-4 h-4" />
-                                )}
-                                {showElevationProfile ? "Hide Elevation" : "Show Elevation Profile"}
-                              </button>
+                              {/* Elevation & Weather Buttons */}
+                              <div className="flex gap-2">
+                                <button
+                                  onClick={toggleElevationProfile}
+                                  disabled={isLoadingElevation}
+                                  className={`flex-1 flex items-center justify-center gap-2 py-2.5 rounded-lg text-sm font-medium transition-all ${
+                                    showElevationProfile 
+                                      ? "bg-emerald-500 text-white" 
+                                      : "bg-emerald-50 text-emerald-700 hover:bg-emerald-100"
+                                  }`}
+                                >
+                                  {isLoadingElevation ? (
+                                    <Loader2 className="w-4 h-4 animate-spin" />
+                                  ) : (
+                                    <TrendingUp className="w-4 h-4" />
+                                  )}
+                                  Elevation
+                                </button>
+                                <button
+                                  onClick={toggleWeatherOverlay}
+                                  disabled={isLoadingWeather}
+                                  className={`flex-1 flex items-center justify-center gap-2 py-2.5 rounded-lg text-sm font-medium transition-all ${
+                                    showWeatherOverlay 
+                                      ? "bg-sky-500 text-white" 
+                                      : "bg-sky-50 text-sky-700 hover:bg-sky-100"
+                                  }`}
+                                >
+                                  {isLoadingWeather ? (
+                                    <Loader2 className="w-4 h-4 animate-spin" />
+                                  ) : (
+                                    <CloudSun className="w-4 h-4" />
+                                  )}
+                                  Weather
+                                </button>
+                              </div>
                             </div>
 
                             {/* Navigation Steps List */}
@@ -2693,6 +2865,23 @@ const MapViewer = () => {
               )}
             </AnimatePresence>
 
+            {/* Weather Overlay */}
+            <AnimatePresence>
+              {showWeatherOverlay && (
+                <WeatherOverlay
+                  weatherData={weatherData}
+                  onClose={() => {
+                    setShowWeatherOverlay(false);
+                    weatherMarkersRef.current.forEach(marker => marker.remove());
+                    weatherMarkersRef.current = [];
+                  }}
+                  isLoading={isLoadingWeather}
+                  selectedIndex={selectedWeatherIndex}
+                  onSelectLocation={setSelectedWeatherIndex}
+                />
+              )}
+            </AnimatePresence>
+
             {/* Location Error Toast */}
             {locationError && (
               <div className="absolute top-20 left-1/2 -translate-x-1/2 z-20">
@@ -2731,21 +2920,28 @@ const MapViewer = () => {
             <div className="flex items-center gap-2">
               <Search className="w-5 h-5 text-primary" />
               <span className="text-sm text-muted-foreground">
-                <strong className="text-foreground">Search</strong> places
+                <strong className="text-foreground">Search</strong>
               </span>
             </div>
             <span className="text-muted-foreground hidden sm:inline">•</span>
             <div className="flex items-center gap-2">
               <Route className="w-5 h-5 text-primary" />
               <span className="text-sm text-muted-foreground">
-                <strong className="text-foreground">Route</strong> navigation
+                <strong className="text-foreground">Route</strong>
               </span>
             </div>
             <span className="text-muted-foreground hidden sm:inline">•</span>
             <div className="flex items-center gap-2">
               <TrendingUp className="w-5 h-5 text-emerald-500" />
               <span className="text-sm text-muted-foreground">
-                <strong className="text-foreground">Elevation</strong> profile
+                <strong className="text-foreground">Elevation</strong>
+              </span>
+            </div>
+            <span className="text-muted-foreground hidden sm:inline">•</span>
+            <div className="flex items-center gap-2">
+              <CloudSun className="w-5 h-5 text-sky-500" />
+              <span className="text-sm text-muted-foreground">
+                <strong className="text-foreground">Weather</strong>
               </span>
             </div>
             <span className="text-muted-foreground hidden sm:inline">•</span>
@@ -2753,13 +2949,6 @@ const MapViewer = () => {
               <MapPin className="w-5 h-5 text-purple-500" />
               <span className="text-sm text-muted-foreground">
                 <strong className="text-foreground">POIs</strong>
-              </span>
-            </div>
-            <span className="text-muted-foreground hidden sm:inline">•</span>
-            <div className="flex items-center gap-2">
-              <Ruler className="w-5 h-5 text-indigo-500" />
-              <span className="text-sm text-muted-foreground">
-                <strong className="text-foreground">Measure</strong>
               </span>
             </div>
           </div>
