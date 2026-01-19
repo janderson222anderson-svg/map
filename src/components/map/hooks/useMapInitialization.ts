@@ -27,37 +27,47 @@ export const useMapInitialization = ({
   useEffect(() => {
     if (!mapContainer.current || map.current) return;
 
-    map.current = new maplibregl.Map({
-      container: mapContainer.current,
-      style: mapStyles[activeStyle].url,
-      center: [69.3451, 30.3753],
-      zoom: 5,
-      pitch: 0,
-      bearing: 0,
-      attributionControl: false,
-    });
-
-    map.current.addControl(
-      new maplibregl.AttributionControl({ compact: true }),
-      "bottom-left"
-    );
-
-    map.current.addControl(
-      new maplibregl.ScaleControl({ maxWidth: 100, unit: "metric" }),
-      "bottom-right"
-    );
-
-    if (onMove) {
-      map.current.on("move", () => {
-        if (!map.current) return;
-        const center = map.current.getCenter();
-        onMove({ lng: center.lng, lat: center.lat }, map.current.getZoom());
+    try {
+      map.current = new maplibregl.Map({
+        container: mapContainer.current,
+        style: mapStyles[activeStyle].url,
+        center: [73.0479, 33.6844], // Islamabad coordinates
+        zoom: 12, // Closer zoom for city view
+        pitch: 0,
+        bearing: 0,
+        attributionControl: false,
       });
-    }
 
-    map.current.on("load", () => {
-      addCityMarkers();
-    });
+      map.current.addControl(
+        new maplibregl.AttributionControl({ compact: true }),
+        "bottom-left"
+      );
+
+      map.current.addControl(
+        new maplibregl.ScaleControl({ maxWidth: 100, unit: "metric" }),
+        "bottom-right"
+      );
+
+      if (onMove) {
+        map.current.on("move", () => {
+          if (!map.current) return;
+          const center = map.current.getCenter();
+          onMove({ lng: center.lng, lat: center.lat }, map.current.getZoom());
+        });
+      }
+
+      map.current.on("load", () => {
+        console.log("Map loaded successfully");
+        addCityMarkers();
+      });
+
+      map.current.on("error", (e) => {
+        console.error("Map error:", e);
+      });
+
+    } catch (error) {
+      console.error("Failed to initialize map:", error);
+    }
 
     return () => {
       markersRef.current.forEach((marker) => marker.remove());

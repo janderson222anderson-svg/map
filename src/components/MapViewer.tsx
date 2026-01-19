@@ -31,10 +31,10 @@ const MapViewer = () => {
   const mapContainer = useRef<HTMLDivElement>(null);
   const mapContainerWrapper = useRef<HTMLDivElement>(null);
 
-  // Map state
+  // Map state - Focus on Islamabad
   const [activeStyle, setActiveStyle] = useState<MapStyle>("streets");
-  const [zoom, setZoom] = useState(5);
-  const [coordinates, setCoordinates] = useState({ lng: 69.3451, lat: 30.3753 });
+  const [zoom, setZoom] = useState(12);
+  const [coordinates, setCoordinates] = useState({ lng: 73.0479, lat: 33.6844 }); // Islamabad coordinates
   const [travelMode, setTravelMode] = useState<TravelMode>("driving");
 
   // UI state
@@ -236,8 +236,8 @@ const MapViewer = () => {
 
   const handleResetView = () => {
     map?.flyTo({
-      center: [69.3451, 30.3753],
-      zoom: 5,
+      center: [73.0479, 33.6844], // Islamabad coordinates
+      zoom: 12, // City-level zoom
       pitch: 0,
       bearing: 0,
       duration: 1500,

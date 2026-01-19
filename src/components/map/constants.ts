@@ -7,8 +7,8 @@ export const mapStyles: Record<MapStyle, { name: string; url: string }> = {
     url: "https://basemaps.cartocdn.com/gl/positron-gl-style/style.json",
   },
   satellite: {
-    name: "Satellite",
-    url: "https://api.maptiler.com/maps/hybrid/style.json?key=get_your_own_OpIi9ZULNHzrESv6T2vL",
+    name: "Satellite", 
+    url: "https://basemaps.cartocdn.com/gl/dark-matter-gl-style/style.json",
   },
   terrain: {
     name: "Terrain",
