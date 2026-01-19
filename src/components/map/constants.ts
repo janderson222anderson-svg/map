@@ -4,7 +4,7 @@ import type { MapStyle, TravelMode, POICategory } from "./types";
 export const mapStyles: Record<MapStyle, { name: string; url: string }> = {
   streets: {
     name: "Streets",
-    url: "https://basemaps.cartocdn.com/gl/positron-gl-style/style.json",
+    url: "https://demotiles.maplibre.org/style.json",
   },
   satellite: {
     name: "Satellite", 

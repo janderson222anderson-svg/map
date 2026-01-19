@@ -60,6 +60,9 @@ const MapViewer = () => {
   const [isLoadingWeather, setIsLoadingWeather] = useState(false);
   const [selectedWeatherIndex, setSelectedWeatherIndex] = useState(0);
 
+  // Map loading state
+  const [isMapLoading, setIsMapLoading] = useState(true);
+
   // Initialize map with custom hook
   const { map } = useMapInitialization({
     mapContainer,
@@ -70,6 +73,7 @@ const MapViewer = () => {
     },
     isRoutingMode,
     selectingPoint: null,
+    onMapLoad: () => setIsMapLoading(false),
   });
 
   // Routing hook
@@ -547,6 +551,17 @@ const MapViewer = () => {
         <div className="relative h-[calc(100vh-120px)]">
           {/* MapLibre Map */}
           <div ref={mapContainer} className="absolute inset-0" />
+
+          {/* Map Loading Overlay */}
+          {isMapLoading && (
+            <div className="absolute inset-0 bg-background/80 backdrop-blur-sm flex items-center justify-center z-50">
+              <div className="text-center">
+                <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-primary mx-auto mb-4"></div>
+                <h3 className="text-lg font-semibold mb-2">Loading Map</h3>
+                <p className="text-muted-foreground">Initializing Islamabad region...</p>
+              </div>
+            </div>
+          )}
 
             {/* Search Bar */}
             <SearchBar

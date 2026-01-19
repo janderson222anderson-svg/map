@@ -10,6 +10,7 @@ interface UseMapInitializationProps {
   isRoutingMode?: boolean;
   selectingPoint?: "start" | "end" | null;
   onCityClick?: (coordinates: [number, number], name: string) => void;
+  onMapLoad?: () => void;
 }
 
 export const useMapInitialization = ({
@@ -19,6 +20,7 @@ export const useMapInitialization = ({
   isRoutingMode,
   selectingPoint,
   onCityClick,
+  onMapLoad,
 }: UseMapInitializationProps) => {
   const map = useRef<maplibregl.Map | null>(null);
   const markersRef = useRef<maplibregl.Marker[]>([]);
@@ -36,6 +38,7 @@ export const useMapInitialization = ({
         pitch: 0,
         bearing: 0,
         attributionControl: false,
+        failIfMajorPerformanceCaveat: false,
       });
 
       map.current.addControl(
@@ -59,10 +62,20 @@ export const useMapInitialization = ({
       map.current.on("load", () => {
         console.log("Map loaded successfully");
         addCityMarkers();
+        onMapLoad?.();
       });
 
       map.current.on("error", (e) => {
         console.error("Map error:", e);
+        // Try fallback style
+        if (map.current && e.error && e.error.message.includes('style')) {
+          console.log("Trying fallback style...");
+          map.current.setStyle("https://demotiles.maplibre.org/style.json");
+        }
+      });
+
+      map.current.on("styledata", () => {
+        console.log("Style loaded");
       });
 
     } catch (error) {
